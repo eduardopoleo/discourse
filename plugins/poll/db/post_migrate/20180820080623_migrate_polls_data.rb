@@ -95,63 +95,67 @@ class MigratePollsData < ActiveRecord::Migration[5.2]
         step = poll["step"].to_i.clamp(0, max)
         anonymous_voters = poll["anonymous_voters"].to_i.clamp(0, PG_INTEGER_MAX)
 
-        poll_id = execute(<<~SQL
-          INSERT INTO polls (
-            post_id,
-            name,
-            type,
-            status,
-            visibility,
-            close_at,
-            min,
-            max,
-            step,
-            anonymous_voters,
-            created_at,
-            updated_at
-          ) VALUES (
-            #{r.post_id},
-            '#{escape(name)}',
-            #{type},
-            #{status},
-            #{visibility},
-            #{close_at ? "'#{close_at}'" : "NULL"},
-            #{min > 0 ? min : "NULL"},
-            #{max > min ? max : "NULL"},
-            #{step > 0 ? step : "NULL"},
-            #{anonymous_voters > 0 ? anonymous_voters : "NULL"},
-            '#{r.created_at}',
-            '#{r.updated_at}'
-          ) RETURNING id
-        SQL
-        )[0]["id"]
+        next if Poll.exists?(post_id: r.post_id, name: escape(name))
 
-        option_ids = Hash[*DB.query_single(<<~SQL
-          INSERT INTO poll_options
-            (poll_id, digest, html, anonymous_votes, created_at, updated_at)
-          VALUES
-            #{poll["options"].map { |option|
-              "(#{poll_id}, '#{escape(option["id"])}', '#{escape(option["html"].strip)}', #{option["anonymous_votes"].to_i}, '#{r.created_at}', '#{r.updated_at}')" }.join(",")
-            }
-          RETURNING digest, id
-        SQL
-        )]
+        ActiveRecord::Base.transaction do
+          poll_id = execute(<<~SQL
+            INSERT INTO polls (
+              post_id,
+              name,
+              type,
+              status,
+              visibility,
+              close_at,
+              min,
+              max,
+              step,
+              anonymous_voters,
+              created_at,
+              updated_at
+            ) VALUES (
+              #{r.post_id},
+              '#{escape(name)}',
+              #{type},
+              #{status},
+              #{visibility},
+              #{close_at ? "'#{close_at}'" : "NULL"},
+              #{min > 0 ? min : "NULL"},
+              #{max > min ? max : "NULL"},
+              #{step > 0 ? step : "NULL"},
+              #{anonymous_voters > 0 ? anonymous_voters : "NULL"},
+              '#{r.created_at}',
+              '#{r.updated_at}'
+            ) RETURNING id
+          SQL
+          )[0]["id"]
 
-        if votes[name].present?
-          poll_votes = votes[name].map do |user_id, options|
-            options
-              .select { |o| option_ids.has_key?(o) }
-              .map { |o| "(#{poll_id}, #{option_ids[o]}, #{user_id.to_i}, '#{r.created_at}', '#{r.updated_at}')" }
-          end
+          option_ids = Hash[*DB.query_single(<<~SQL
+            INSERT INTO poll_options
+              (poll_id, digest, html, anonymous_votes, created_at, updated_at)
+            VALUES
+              #{poll["options"].map { |option|
+                "(#{poll_id}, '#{escape(option["id"])}', '#{escape(option["html"].strip)}', #{option["anonymous_votes"].to_i}, '#{r.created_at}', '#{r.updated_at}')" }.join(",")
+              }
+            RETURNING digest, id
+          SQL
+          )]
 
-          poll_votes.flatten!
-          poll_votes.uniq!
+          if votes[name].present?
+            poll_votes = votes[name].map do |user_id, options|
+              options
+                .select { |o| option_ids.has_key?(o) }
+                .map { |o| "(#{poll_id}, #{option_ids[o]}, #{user_id.to_i}, '#{r.created_at}', '#{r.updated_at}')" }
+            end
 
-          if poll_votes.present?
-            execute <<~SQL
-              INSERT INTO poll_votes (poll_id, poll_option_id, user_id, created_at, updated_at)
-              VALUES #{poll_votes.join(",")}
-            SQL
+            poll_votes.flatten!
+            poll_votes.uniq!
+
+            if poll_votes.present?
+              execute <<~SQL
+                INSERT INTO poll_votes (poll_id, poll_option_id, user_id, created_at, updated_at)
+                VALUES #{poll_votes.join(",")}
+              SQL
+            end
           end
         end
       end
